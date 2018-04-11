@@ -127,13 +127,13 @@ type namedPreparer interface {
 	binder
 }
 
-func prepareNamed(p namedPreparer, query string) (*NamedStmt, error) {
+func prepareNamed(p namedPreparer, tracer tracerx, query string) (*NamedStmt, error) {
 	bindType := BindType(p.DriverName())
 	q, args, err := compileNamedQuery([]byte(query), bindType)
 	if err != nil {
 		return nil, err
 	}
-	stmt, err := Preparex(p, q)
+	stmt, err := Preparex(p, tracer, q)
 	if err != nil {
 		return nil, err
 	}

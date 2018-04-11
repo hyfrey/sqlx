@@ -14,13 +14,13 @@ type namedPreparerContext interface {
 	binder
 }
 
-func prepareNamedContext(ctx context.Context, p namedPreparerContext, query string) (*NamedStmt, error) {
+func prepareNamedContext(ctx context.Context, p namedPreparerContext, tracer tracerx, query string) (*NamedStmt, error) {
 	bindType := BindType(p.DriverName())
 	q, args, err := compileNamedQuery([]byte(query), bindType)
 	if err != nil {
 		return nil, err
 	}
-	stmt, err := PreparexContext(ctx, p, q)
+	stmt, err := PreparexContext(ctx, p, tracer, q)
 	if err != nil {
 		return nil, err
 	}

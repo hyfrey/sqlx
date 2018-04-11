@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/jmoiron/sqlx/reflectx"
+	"github.com/opentracing/opentracing-go"
 )
 
 // Although the NameMapper is convenient, in practice it should not
@@ -247,13 +248,15 @@ type DB struct {
 	*sql.DB
 	driverName string
 	unsafe     bool
+	tracer     tracerx
 	Mapper     *reflectx.Mapper
 }
 
 // NewDb returns a new sqlx DB wrapper for a pre-existing *sql.DB.  The
 // driverName of the original database is required for named query support.
 func NewDb(db *sql.DB, driverName string) *DB {
-	return &DB{DB: db, driverName: driverName, Mapper: mapper()}
+	tx := tracerx{opentracing.NoopTracer{}, driverName}
+	return &DB{DB: db, driverName: driverName, tracer: tx, Mapper: mapper()}
 }
 
 // DriverName returns the driverName passed to the Open function for this DB.
@@ -267,7 +270,8 @@ func Open(driverName, dataSourceName string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{DB: db, driverName: driverName, Mapper: mapper()}, err
+	tx := tracerx{opentracing.NoopTracer{}, driverName}
+	return &DB{DB: db, driverName: driverName, tracer: tx, Mapper: mapper()}, err
 }
 
 // MustOpen is the same as sql.Open, but returns an *sqlx.DB instead and panics on error.
@@ -285,6 +289,11 @@ func (db *DB) MapperFunc(mf func(string) string) {
 	db.Mapper = reflectx.NewMapperFunc("db", mf)
 }
 
+// Tracer sets a opentracing tracer for this db
+func (db *DB) Tracer(tracer opentracing.Tracer) {
+	db.tracer.tracer = tracer
+}
+
 // Rebind transforms a query from QUESTION to the DB driver's bindvar type.
 func (db *DB) Rebind(query string) string {
 	return Rebind(BindType(db.driverName), query)
@@ -295,7 +304,7 @@ func (db *DB) Rebind(query string) string {
 // sqlx.Stmt and sqlx.Tx which are created from this DB will inherit its
 // safety behavior.
 func (db *DB) Unsafe() *DB {
-	return &DB{DB: db.DB, driverName: db.driverName, unsafe: true, Mapper: db.Mapper}
+	return &DB{DB: db.DB, driverName: db.driverName, unsafe: true, tracer: db.tracer, Mapper: db.Mapper}
 }
 
 // BindNamed binds a query using the DB driver's bindvar type.
@@ -372,17 +381,18 @@ func (db *DB) MustExec(query string, args ...interface{}) sql.Result {
 
 // Preparex returns an sqlx.Stmt instead of a sql.Stmt
 func (db *DB) Preparex(query string) (*Stmt, error) {
-	return Preparex(db, query)
+	return Preparex(db, db.tracer, query)
 }
 
 // PrepareNamed returns an sqlx.NamedStmt
 func (db *DB) PrepareNamed(query string) (*NamedStmt, error) {
-	return prepareNamed(db, query)
+	return prepareNamed(db, db.tracer, query)
 }
 
 // Tx is an sqlx wrapper around sql.Tx with extra functionality
 type Tx struct {
 	*sql.Tx
+	tracer     tracerx
 	driverName string
 	unsafe     bool
 	Mapper     *reflectx.Mapper
@@ -401,7 +411,7 @@ func (tx *Tx) Rebind(query string) string {
 // Unsafe returns a version of Tx which will silently succeed to scan when
 // columns in the SQL result have no fields in the destination struct.
 func (tx *Tx) Unsafe() *Tx {
-	return &Tx{Tx: tx.Tx, driverName: tx.driverName, unsafe: true, Mapper: tx.Mapper}
+	return &Tx{Tx: tx.Tx, tracer: tx.tracer, driverName: tx.driverName, unsafe: true, Mapper: tx.Mapper}
 }
 
 // BindNamed binds a query within a transaction's bindvar type.
@@ -459,7 +469,7 @@ func (tx *Tx) MustExec(query string, args ...interface{}) sql.Result {
 
 // Preparex  a statement within a transaction.
 func (tx *Tx) Preparex(query string) (*Stmt, error) {
-	return Preparex(tx, query)
+	return Preparex(tx, tx.tracer, query)
 }
 
 // Stmtx returns a version of the prepared statement which runs within a transaction.  Provided
@@ -492,20 +502,22 @@ func (tx *Tx) NamedStmt(stmt *NamedStmt) *NamedStmt {
 
 // PrepareNamed returns an sqlx.NamedStmt
 func (tx *Tx) PrepareNamed(query string) (*NamedStmt, error) {
-	return prepareNamed(tx, query)
+	return prepareNamed(tx, tx.tracer, query)
 }
 
 // Stmt is an sqlx wrapper around sql.Stmt with extra functionality
 type Stmt struct {
 	*sql.Stmt
+	tracer tracerx
 	unsafe bool
+	query  string
 	Mapper *reflectx.Mapper
 }
 
 // Unsafe returns a version of Stmt which will silently succeed to scan when
 // columns in the SQL result have no fields in the destination struct.
 func (s *Stmt) Unsafe() *Stmt {
-	return &Stmt{Stmt: s.Stmt, unsafe: true, Mapper: s.Mapper}
+	return &Stmt{Stmt: s.Stmt, tracer: s.tracer, unsafe: true, query: s.query, Mapper: s.Mapper}
 }
 
 // Select using the prepared statement.
@@ -655,12 +667,12 @@ func MustConnect(driverName, dataSourceName string) *DB {
 }
 
 // Preparex prepares a statement.
-func Preparex(p Preparer, query string) (*Stmt, error) {
+func Preparex(p Preparer, tracer tracerx, query string) (*Stmt, error) {
 	s, err := p.Prepare(query)
 	if err != nil {
 		return nil, err
 	}
-	return &Stmt{Stmt: s, unsafe: isUnsafe(p), Mapper: mapperFor(p)}, err
+	return &Stmt{Stmt: s, tracer: tracer, unsafe: isUnsafe(p), query: query, Mapper: mapperFor(p)}, err
 }
 
 // Select executes a query using the provided Queryer, and StructScans each row
